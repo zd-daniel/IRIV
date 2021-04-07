@@ -23,55 +23,68 @@ class IRIV:
         self.max_components = max_components
         self.back_elimination = Elimination(max_components)
 
-    def iteration(self, data, label, iter_num=1000, min_dimension=6):
+    def iteration(self, data, label, iter_num=100, min_dimension=10):
         self.data, self.label = data, label
-        for _ in range(iter_num):
-            new_data, fai_0, fai_i = self.__calculate_informative_variable(data, label)
-            if new_data.shape[1] == data.shape[1] or new_data.shape[1] < min_dimension:
-                data = new_data
+        for j in range(iter_num):
+            start_time = time.time()
+            store_variables, remove_variables = self.__calculate_informative_variable(data, label)
+            if np.sum(remove_variables) == 0 or np.sum(store_variables) <= min_dimension:
+                data = data[:, store_variables]
+                print('The iterative rounds of IRIV have been finished, now enter into the process of backward elimination!\n')
                 break
-            else:
-                data = new_data
 
-        # 是否进行U检验区分强信息和弱信息
-        p_val = []
-        for p in range(fai_0.shape[1]):
-            _, pVal = stats.mannwhitneyu(fai_0[:, p], fai_i[:, p], alternative='two-sided')
-            p_val.append(pVal)
-        p_val = np.stack(p_val)
+            data = data[:, store_variables]
+            print('The %d th round of IRIV has finished!  ' % (j + 1))
+            print('Remain %d / %d  variable, using time: %g seconds!\n' % (data.shape[1],
+                                                                           self.data.shape[1],
+                                                                           time.time() - start_time))
 
         data, _ = self.back_elimination.iteration(data, label)
         self.remain_data = data
         return data
 
     def __calculate_informative_variable(self, data, label):
-        '''返回强或弱信息变量的索引'''
+        '''返回强弱信息变量 和无 干扰信息的索引'''
         rmsecv5, A = self.__calculate_rmsecv(data, label)
+        rmsecv_origin = np.tile(rmsecv5[:, 0].reshape(-1, 1), (A.shape[1], ))
+        rmsecv_replace = rmsecv5[:, 1:]
 
-        fai_0, fai_i = np.zeros(data.shape), np.zeros(data.shape)
-        fai_0[A == 0] = rmsecv5[:, 1:][A == 0]
-        fai_0[fai_0 == 0] = rmsecv5[:, 0].reshape(-1, 1).repeat(data.shape[1], axis=1)[fai_0 == 0]
-        Mi_in = np.mean(fai_0, axis=0)
-        fai_i[A == 1] = rmsecv5[:, 1:][A == 1]
-        fai_i[fai_i == 0] = rmsecv5[:, 0].reshape(-1, 1).repeat(data.shape[1], axis=1)[fai_i == 0]
-        Mi_out = np.mean(fai_i, axis=0)
-        DMEAN = Mi_in - Mi_out
-        return data[:, np.where(DMEAN < 0)[0]], fai_0, fai_i
+        rmsecv_exclude = rmsecv_replace.copy()
+        rmsecv_include = rmsecv_replace.copy()
+        rmsecv_exclude[A == 0] = rmsecv_origin[A == 0]
+        rmsecv_include[A == 1] = rmsecv_origin[A == 1]
+        exclude_mean = np.mean(rmsecv_exclude, axis=0)
+        include_mean = np.mean(rmsecv_include, axis=0)
+
+        p_val, DMEAN = [], []
+        for i in range(A.shape[1]):
+            _, pVal = stats.mannwhitneyu(rmsecv_exclude[:, i], rmsecv_include[:, i], alternative='two-sided')
+            temp_DMEAN = exclude_mean[i] - include_mean[i]
+
+            p_val.append(pVal)
+            DMEAN.append(temp_DMEAN)
+        p_val = np.stack(p_val)
+        DMEAN = np.stack(DMEAN)
+
+        strong_inform = (DMEAN < 0) * (p_val < 0.05)
+        weak_inform = (DMEAN < 0) * (p_val >= 0.05)
+        un_inform = (DMEAN >= 0) * (p_val >= 0.05)
+        interfering = (DMEAN >= 0) * (p_val < 0.05)
+        remove_variables = un_inform | interfering
+        store_variables = strong_inform | weak_inform
+        return store_variables, remove_variables
 
     def __calculate_rmsecv(self, data, label):
-        rmsecv5 = np.zeros((data.shape[0], data.shape[1]+1))  # PLS的五折交叉验证计算rmse
-        A = np.ones(data.shape)
-        A[data.shape[0] // 2:] = 0
-        A = np.stack([np.random.permutation(sub_a) for sub_a in A.transpose()]).transpose()
+        A, row = self.__generate_binary_matrix(data)
+
+        rmsecv5 = np.zeros((row, data.shape[1]+1))  # PLS的五折交叉验证计算rmse
         for k, sub_a in enumerate(A):
             sub_data = data[:, sub_a == 1]
 
             n_component = min(np.sum(sub_a == 1), self.max_components)
-            if n_component == 0:
-                break
             model = PLSRegression(n_components=n_component, max_iter=1000)
             score = cross_val_score(model, sub_data, label, cv=5, n_jobs=-1, scoring='neg_mean_squared_error').mean()
-            rmsecv5[k, 0] = -score
+            rmsecv5[k, 0] = np.sqrt(-score)
 
         # 分别置换每一列特征的0 1， 得到B，同样方法交叉验证得到rmsecv
         for i in range(data.shape[1]):
@@ -81,12 +94,32 @@ class IRIV:
                 sub_data = data[:, sub_b == 1]
 
                 n_component = min(np.sum(sub_b == 1), self.max_components)
-                if n_component == 0:
-                    break
                 model = PLSRegression(n_components=n_component, max_iter=1000)
                 score = cross_val_score(model, sub_data, label, cv=5, n_jobs=-1, scoring='neg_mean_squared_error').mean()
-                rmsecv5[k, i+1] = -score
+                rmsecv5[k, i+1] = np.sqrt(-score)
         return rmsecv5, A
+
+    def __generate_binary_matrix(self, data):
+        # 新建二值矩阵A
+        if data.shape[1] >= 500:
+            row = 500
+        elif data.shape[1] >= 300:
+            row = 300
+        elif data.shape[1] >= 100:
+            row = 200
+        elif data.shape[1] >= 50:
+            row = 100
+        else:
+            row = 50
+
+        A = np.ones((row, data.shape[1]))
+        A[row // 2:] = 0
+
+        while True:
+            A = np.stack([np.random.permutation(sub_a) for sub_a in A.transpose()]).transpose()
+            if not np.sum(np.sum(A, axis=1) == 0):
+                break
+        return A, row
 
     def remain_index(self):
         index = []
@@ -101,12 +134,13 @@ class Elimination:
 
     def iteration(self, data, label):
         delete_index = []
+        base_score = self.__get_score(data, label)
         while True:
-            base_score = self.__get_score(data, label, delete_index)
             scores = self.__get_partial_score(data, label, delete_index)
             if base_score < scores.min():
                 break
             else:
+                base_score = scores.min()
                 index = np.argmin(scores)
                 delete_index.append(index)
         return np.delete(data, delete_index, axis=1), delete_index
@@ -124,15 +158,27 @@ class Elimination:
             n_component = min(sub_data.shape[1], self.max_components)
             model = PLSRegression(n_components=n_component, max_iter=1000)
             sub_score = cross_val_score(model, sub_data, label, cv=5, n_jobs=-1, scoring='neg_mean_squared_error').mean()
-            scores.append(-sub_score)
+            scores.append(np.sqrt(-sub_score))
         return np.stack(scores)
 
-    def __get_score(self, data, label, delete_index):
-        if len(delete_index) > 0:
-            data = np.delete(data, delete_index, axis=1)
-
+    def __get_score(self, data, label):
         n_component = min(data.shape[1], self.max_components)
         model = PLSRegression(n_components=n_component, max_iter=1000)
         score = cross_val_score(model, data, label, cv=5, n_jobs=-1, scoring='neg_mean_squared_error').mean()
-        return -score
+        return np.sqrt(-score)
 
+
+def calculate_retained_index(train_data, train_label):
+    start_time = time.time()
+    iriv_model = IRIV()
+    iriv_model.iteration(train_data, train_label)
+    retained_index = iriv_model.remain_index()
+    end_time = time.time()
+    print('计算强弱信息变量完成，耗时 %.3fs' % (end_time - start_time))
+    print('保留索引[从0开始]：', retained_index)
+
+    return retained_index
+
+
+if __name__ == '__main__':
+    calculate_retained_index(train_data, train_label)
