@@ -28,6 +28,9 @@ class IRIV:
         for j in range(iter_num):
             start_time = time.time()
             store_variables, remove_variables = self.__calculate_informative_variable(data, label)
+            print(store_variables)
+            print(remove_variables)
+            print('-------------')
             if np.sum(remove_variables) == 0 or np.sum(store_variables) <= min_dimension:
                 data = data[:, store_variables]
                 print('The iterative rounds of IRIV have been finished, now enter into the process of backward elimination!\n')
@@ -56,20 +59,26 @@ class IRIV:
         exclude_mean = np.mean(rmsecv_exclude, axis=0)
         include_mean = np.mean(rmsecv_include, axis=0)
 
-        p_val, DMEAN = [], []
+        p_val, DMEAN, H = [], [], []
         for i in range(A.shape[1]):
             _, pVal = stats.mannwhitneyu(rmsecv_exclude[:, i], rmsecv_include[:, i], alternative='two-sided')
+            H.append(int(pVal <= 0.05))
+
+            # # Just a trick, indicating uninformative and interfering variable if Pvalue>1
             temp_DMEAN = exclude_mean[i] - include_mean[i]
+            if temp_DMEAN < 0:
+                pVal = pVal + 1
 
             p_val.append(pVal)
             DMEAN.append(temp_DMEAN)
         p_val = np.stack(p_val)
         DMEAN = np.stack(DMEAN)
+        H = np.stack(H)
 
-        strong_inform = (DMEAN < 0) * (p_val < 0.05)
-        weak_inform = (DMEAN < 0) * (p_val >= 0.05)
-        un_inform = (DMEAN >= 0) * (p_val >= 0.05)
-        interfering = (DMEAN >= 0) * (p_val < 0.05)
+        strong_inform = (H == 1) * (p_val < 1)
+        weak_inform = (H == 0) * (p_val < 1)
+        un_inform = (H == 0) * (p_val >= 1)
+        interfering = (H == 1) * (p_val >= 1)
         remove_variables = un_inform | interfering
         store_variables = strong_inform | weak_inform
         return store_variables, remove_variables
