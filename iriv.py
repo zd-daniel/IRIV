@@ -28,9 +28,6 @@ class IRIV:
         for j in range(iter_num):
             start_time = time.time()
             store_variables, remove_variables = self.__calculate_informative_variable(data, label)
-            print(store_variables)
-            print(remove_variables)
-            print('-------------')
             if np.sum(remove_variables) == 0 or np.sum(store_variables) <= min_dimension:
                 data = data[:, store_variables]
                 print('The iterative rounds of IRIV have been finished, now enter into the process of backward elimination!\n')
